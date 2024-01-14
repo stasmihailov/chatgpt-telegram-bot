@@ -1,0 +1,9 @@
+# jetbrains
+*.iml
+/.idea
+
+# python
+/venv
+
+# project
+.env.yaml
