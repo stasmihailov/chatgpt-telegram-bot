@@ -106,30 +106,13 @@ class Responses:
 
         requests.post(url, json=payload)
 
-    @staticmethod
-    def answer_inline(query_id, images):
-        url = f'https://api.telegram.org/bot{tg_token}/answerInlineQuery'
-        payload = {
-            'inline_query_id': query_id,
-            'results': [{
-                type: 'photo',
-                id: rand.randint(0, 100_000),
-                'photo_url': img,
-                'thumb_url': img,
-            } for img in images],
-        }
 
-        requests.post(url, json=payload)
-
-
-def generate_images(request):
+def generate_response(request):
     msg = request.get_json()
 
     try:
         if 'message' in msg and 'text' in msg['message']:
             respond_message(msg)
-        elif 'inline_query' in msg and 'query' in msg['inline_query']:
-            respond_inline(msg)
     finally:
         pass
 
@@ -157,9 +140,7 @@ def respond_message(msg):
 def respond_command(chat_id, query):
     if query == '/start' or query == '/help':
         with Responses.pretend_typing(chat_id):
-            Responses.send_message(chat_id, "Hello! This bot will generate images using DALL·E 2 based on your queries."
-                                            "Simply describe the image you want - for example, you can try typing "
-                                            "'sunset' or 'cat'.")
+            Responses.send_message(chat_id, "Start by sending a message - for example, 'What can this bot do?'")
     elif query == '/tokens':
         with Responses.pretend_typing(chat_id):
             tokens, expiration, err = Requests.get_remaining_credit()
@@ -169,16 +150,3 @@ def respond_command(chat_id, query):
 
             Responses.send_message(chat_id, f"You have {tokens} remaining token(s) to spend "
                                             f"until {expiration}")
-
-
-def respond_inline(msg):
-    query = msg['inline_query']['query']
-    query_id = msg['inline_query']['id']
-
-    if not query:
-        return
-
-    images, err = Requests.generate(query, ctx={'query_id': query_id})
-    if err:
-        return
-    Responses.answer_inline(query_id, images)
