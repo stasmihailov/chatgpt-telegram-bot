@@ -2,10 +2,15 @@ import contextlib
 import datetime
 import os
 import random
+from enum import Enum
+from typing import Dict
 
 import openai
 import requests
-from openai import InvalidRequestError
+from openai import BadRequestError
+from openai import OpenAI
+from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
 
 
 def getenv(key):
@@ -21,6 +26,7 @@ def getenv(key):
 
 openai.api_key = getenv("OPENAI_API_KEY")
 tg_token = getenv("TG_TOKEN")
+client = OpenAI(api_key= openai.api_key)
 
 rand = random.Random()
 img_price = 0.02
@@ -38,7 +44,7 @@ class Requests:
                 n=1,
                 size="1024x1024"
             )
-        except InvalidRequestError as e:
+        except BadRequestError as e:
             print(e)
             return None, str(e)
         except Exception as e:
@@ -50,12 +56,40 @@ class Requests:
         return images, None
 
     @staticmethod
+    def generate_text(query, **ctx):
+        if not ctx:
+            ctx = {}
+
+        try:
+            response: ChatCompletion = client.chat.completions.create(
+                model='gpt-4',
+                # stream=True,
+                messages=[
+                    message(Role.USER, query)
+                ]
+            )
+        except BadRequestError as e:
+            print(e)
+            return None, str(e)
+        except Exception as e:
+            print(e)
+            return None, 'Something went wrong, please try again later'
+
+        print({**ctx, 'response': response})
+
+        first_choice = response.choices[0]
+        # verify message stop reason here
+        # first_choice.finish_reason == Choice.
+
+        return first_choice.message.content, None
+
+    @staticmethod
     def get_remaining_credit():
         try:
             resp = requests.get('https://api.openai.com/dashboard/billing/credit_grants', headers={
                 'Authorization': f'Bearer {openai.api_key}'
             }).json()
-        except InvalidRequestError as e:
+        except BadRequestError as e:
             print(e)
             return None, None, str(e)
         except Exception as e:
@@ -107,6 +141,18 @@ class Responses:
         requests.post(url, json=payload)
 
 
+class Role(Enum):
+    SYSTEM = 'system'
+    USER = 'user'
+
+
+def message(role: Role, content: str) -> Dict:
+    return {
+        'role': str(role.value),
+        'content': content
+    }
+
+
 def generate_response(request):
     msg = request.get_json()
 
@@ -128,13 +174,12 @@ def respond_message(msg):
         return
 
     with Responses.pretend_typing(chat_id):
-        images, err = Requests.generate(query, ctx={'chat_id': chat_id})
+        text, err = Requests.generate_text(query, ctx={'chat_id': chat_id})
         if err:
             Responses.send_message(chat_id, err)
             return
 
-        for idx, image in enumerate(images):
-            Responses.send_photo(chat_id, image)
+        Responses.send_message(chat_id, text)
 
 
 def respond_command(chat_id, query):
