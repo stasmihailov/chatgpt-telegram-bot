@@ -24,9 +24,8 @@ def getenv(key):
     return os.getenv(key)
 
 
-openai.api_key = getenv("OPENAI_API_KEY")
 tg_token = getenv("TG_TOKEN")
-client = OpenAI(api_key= openai.api_key)
+client = OpenAI(api_key=getenv("OPENAI_API_KEY"))
 
 rand = random.Random()
 img_price = 0.02
