@@ -1,16 +1,18 @@
+import asyncio
 import contextlib
+import dataclasses
 import datetime
 import os
 import random
 from enum import Enum
 from typing import Dict
 
+import aiohttp
 import openai
 import requests
-from openai import BadRequestError
+from openai import BadRequestError, Stream
 from openai import OpenAI
-from openai.types.chat import ChatCompletion
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat import ChatCompletionChunk
 
 
 def getenv(key):
@@ -30,6 +32,22 @@ client = OpenAI(api_key=getenv("OPENAI_API_KEY"))
 rand = random.Random()
 img_price = 0.02
 
+async def send_post_request(url, data):
+    async with aiohttp.ClientSession() as session:
+        session.post(url, data=data)
+
+
+@dataclasses.dataclass
+class TgMessage:
+    message_id: int
+    text: str
+
+
+@dataclasses.dataclass
+class TgError:
+    code: int
+    description: str
+
 
 class Requests:
     @staticmethod
@@ -44,14 +62,13 @@ class Requests:
                 size="1024x1024"
             )
         except BadRequestError as e:
-            print(e)
+            print('caught BadRequestError:', e)
             return None, str(e)
         except Exception as e:
-            print(e)
+            print('caught Exception:', e)
             return None, 'Internal server error'
 
         images = [data['url'] for data in response['data']]
-        print({**ctx, 'query': query, 'images': images})
         return images, None
 
     @staticmethod
@@ -60,27 +77,26 @@ class Requests:
             ctx = {}
 
         try:
-            response: ChatCompletion = client.chat.completions.create(
+            response: Stream[ChatCompletionChunk] = client.chat.completions.create(
                 model='gpt-4',
-                # stream=True,
+                stream=True,
                 messages=[
                     message(Role.USER, query)
                 ]
             )
         except BadRequestError as e:
-            print(e)
-            return None, str(e)
+            print('caught BadRequestError:', e)
+            yield None, str(e)
+            return
         except Exception as e:
-            print(e)
-            return None, 'Something went wrong, please try again later'
+            print('caught Exception:', e)
+            yield None, 'Something went wrong, please try again later'
+            return
 
-        print({**ctx, 'response': response})
-
-        first_choice = response.choices[0]
-        # verify message stop reason here
-        # first_choice.finish_reason == Choice.
-
-        return first_choice.message.content, None
+        for chunk in response:
+            chunk_text = chunk.choices[0].delta.content
+            if chunk_text:
+                yield chunk_text, None
 
     @staticmethod
     def get_remaining_credit():
@@ -89,10 +105,10 @@ class Requests:
                 'Authorization': f'Bearer {openai.api_key}'
             }).json()
         except BadRequestError as e:
-            print(e)
+            print('caught BadRequestError:', e)
             return None, None, str(e)
         except Exception as e:
-            print(e)
+            print('caught Exception:', e)
             return None, None, 'Internal server error'
         if 'grants' not in resp:
             return None, None, 'Internal server error'
@@ -130,14 +146,35 @@ class Responses:
         requests.post(url, json=payload)
 
     @staticmethod
-    def send_message(chat_id, text):
+    def send_message(chat_id, text) -> TgMessage | TgError:
         url = f'https://api.telegram.org/bot{tg_token}/sendMessage'
         payload = {
             'chat_id': chat_id,
             'text': text,
         }
 
-        requests.post(url, json=payload)
+        response = requests.post(url, json=payload).json()
+        if response['ok']:
+            return TgMessage(
+                message_id=response['result']['message_id'],
+                text=response['result']['text']
+            )
+        else:
+            return TgError(
+                code=response['error_code'],
+                description=response['description'],
+            )
+
+    @staticmethod
+    async def edit_message(chat_id, message_id, text):
+        url = f'https://api.telegram.org/bot{tg_token}/editMessageText'
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': text,
+        }
+
+        asyncio.create_task(send_post_request(url, data=payload))
 
 
 class Role(Enum):
@@ -173,12 +210,22 @@ def respond_message(msg):
         return
 
     with Responses.pretend_typing(chat_id):
-        text, err = Requests.generate_text(query, ctx={'chat_id': chat_id})
-        if err:
-            Responses.send_message(chat_id, err)
-            return
+        curr_msg_id, curr_text = None, None
 
-        Responses.send_message(chat_id, text)
+        for text, err in Requests.generate_text(query, ctx={'chat_id': chat_id}):
+            if err:
+                Responses.send_message(chat_id, err)
+                return
+            elif not curr_msg_id:
+                new_msg = Responses.send_message(chat_id, text)
+                if isinstance(new_msg, TgError):
+                    print('caught TgError:', new_msg)
+                    return
+                else:
+                    curr_msg_id, curr_text = new_msg.message_id, new_msg.text
+            else:
+                curr_text += text
+                Responses.edit_message(chat_id, curr_msg_id, curr_text)
 
 
 def respond_command(chat_id, query):
